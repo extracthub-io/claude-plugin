@@ -1,0 +1,17 @@
+{
+  "name": "extracthub",
+  "description": "ExtractHub plugin for Claude Code: extractor and pipeline builder skills plus the ExtractHub MCP server.",
+  "owner": {
+    "name": "ExtractHub",
+    "url": "https://extracthub.io"
+  },
+  "plugins": [
+    {
+      "name": "extracthub",
+      "source": "./",
+      "description": "Build, test and release ExtractHub extractors (versioned web scrapers) and pipelines, and run them through the ExtractHub MCP server.",
+      "category": "development",
+      "tags": ["web-scraping", "mcp", "skills"]
+    }
+  ]
+}

@@ -1,0 +1,253 @@
+---
+name: extracthub-extractor-builder
+description: Builds, tests and uploads ExtractHub extractors (web scraping definitions of request options + CSS/JSON field config that turn a page type into structured JSON). Use when the user wants to create, build, write, fix or improve an ExtractHub extractor, scrape a site or page type "with ExtractHub", turn product / listing / article / job / search pages or a JSON API into JSON through ExtractHub, or upload / release an extractor to ExtractHub (with or without the ExtractHub MCP server).
+---
+
+# ExtractHub extractor builder
+
+An ExtractHub extractor is a JSON definition: how to fetch a page (request options) and how to turn it
+into JSON (`extractorConfig`). Callers run it on any URL of the same page type through the ExtractHub API or
+MCP `extract` tool. Your job: write a definition that is correct on the real page, validate it, upload it,
+test it, and release it only when the user agrees.
+
+Reference files (read when needed):
+- [references/config-reference.md](references/config-reference.md): every field shape, extract type, JSON path rule and transform (incl. the ones with options: `split`, `after`, `before`, `between`, `nth`, `removeQueryParams`; no regex).
+- [references/request-options.md](references/request-options.md): sample pages (raw vs rendered), proxy, JS rendering, browser actions, XHR, POST, country, price tiers, Studio import file.
+- [references/selectors-and-pitfalls.md](references/selectors-and-pitfalls.md): supported selector syntax, stable selectors, engine pitfalls.
+- [references/troubleshooting.md](references/troubleshooting.md): empty fields, wrong values, blocked pages, JS-only content, API errors.
+- [references/releasing-and-versions.md](references/releasing-and-versions.md): draft, pins, semver, visibility.
+- [examples/](examples/README.md): six complete definitions (static list, product detail, JSON API, embedded JSON, JS-rendered, POST API).
+
+Multi-step scrapes (a list page, then every detail page it links to, into one dataset) are pipelines: build each
+extractor here, then follow the **extracthub-pipeline-builder** skill to chain them.
+
+## Workflow
+
+Copy this checklist and keep it updated:
+
+```
+Extractor progress:
+- [ ] 1. Page type, example URL(s) and fields agreed
+- [ ] 2. Page saved to a sample file; fetch mode chosen (HTML / embedded JSON / JSON API / JS / XHR)
+- [ ] 3. Definition written
+- [ ] 4. Validated on the sample file (scripts/validate.mjs, or local checker) and fixed
+- [ ] 5. Uploaded as private draft; live-tested on @draft; output matches the dry run
+- [ ] 6. Released (only with the user's OK); pins explained
+```
+
+### 1. Clarify (ask only what is missing)
+- Page type and one or two example URLs (a real URL is required; a second URL of the same type catches
+  page-specific selectors).
+- The fields the user wants. If they only name the page type, propose a short default set (e.g. product:
+  name, price, currency, originalPrice, inStock, images, url) and confirm it.
+- List page or detail page? For lists: one object per item, plus `nextPageUrl` if it paginates.
+Do not ask about request options; you decide them in step 2.
+
+### 2. Inspect the target page
+Save the page to a FILE the way ExtractHub would fetch it (no browser first), one file per example URL:
+```bash
+curl -sL -A "Mozilla/5.0" "<url>" -o samples/page-1.html
+```
+This raw HTML is your validation sample for a plain fetch. Keep it on disk: step 4 sends it to the validator
+with `scripts/validate.mjs`, so you never paste a page into a tool call. Then decide
+(details and how to save a rendered sample: references/request-options.md, "Sample pages"):
+
+1. Is the data in the raw HTML? → plain fetch, no JS. If the site is open (your curl got the real page, not an
+   error or challenge page), the direct tier (`useProxy: false`) is cheapest and a failed direct call is not
+   charged, so it is worth one live test; otherwise, or if that test is blocked, `useProxy: true`.
+2. Is it in a `<script>` JSON block (`application/ld+json`, `script#__NEXT_DATA__`, `window.__STATE__ = {...}`,
+   `self.__next_f.push`)? → still a plain fetch, read it with `jsonContent`. Often the most stable source.
+   A list in that JSON: one `jsonPath` with `[*]` + JSON `subFields` (config-reference, "Lists from embedded
+   JSON"), so the page stays on the plain-fetch price instead of the JavaScript tier.
+3. Does the URL return JSON, or does the page load its data from a JSON API you can call directly? →
+   `sourceType: "json"` on that URL.
+4. Only an empty shell / skeleton in the raw HTML? → `renderJavascript: true` + a `wait_for_element`
+   browser action. Save the RENDERED DOM to a second file (Playwright `page.content()`, or
+   `document.documentElement.outerHTML` from a browser tool written to disk) and compare it with the raw
+   file: data only in the rendered one confirms JS is needed. Write selectors and validate against the
+   rendered file, still limited to the supported selector syntax. Never validate a plain-fetch extractor
+   against a rendered DOM (selectors on JS-added elements pass the dry run and come back empty live), and
+   never take a sample from a logged-in or personal browser profile.
+5. Data only in background responses → `renderJavascript` + `captureXhr` + `xhrUrlFilter`, `sourceType: "json"`.
+6. Clicks / scrolling / typing needed → `browserActions` (needs `renderJavascript`).
+7. An error, challenge or placeholder page instead of the content → keep `useProxy: true`; add `proxyCountry` if
+   the site serves by country, `allowJsEscalation: true` if the page sometimes needs JavaScript.
+8. Your own fetch is blocked, or only shows a JS wall ("enable JavaScript", a consent page)? That says
+   little about what ExtractHub's managed fetching gets: it often receives the full HTML without a
+   browser (Google Search does). Do not jump to `renderJavascript`: get a sample THROUGH ExtractHub with
+   `useProxy: true` and no JS (references/request-options.md, "Samples through ExtractHub"; one `premium`
+   call). Switch to JS only if that sample lacks the data too. Do not work around the block yourself
+   (spoofed User-Agents, "no-JS" variants of the site): the extractor would not fetch that way.
+9. Data that only loads after a click (a transcript, "show more" reviews)? Check that request in a local
+   browser first (DevTools Network). If it answers 4xx to an automated browser (the YouTube transcript
+   request returns 400), the site protects it: stop there and tell the user, before spending JS-tier
+   calls on `browserActions`.
+10. Big sites may give automated traffic other links than a browser sees, e.g. opaque redirect links
+   (Google `/goto?url=<token>`) instead of the target URL. Check a live sample through ExtractHub before
+   promising the real URL in a field.
+
+Price tiers (names as `get_account` returns them): `direct` (`useProxy: false`, no JS) < `premium`
+(`useProxy: true`, no JS) < `premium_js` (JS rendering, XHR capture or browser actions, always through the
+proxy). Use the JS tier only when 1-3 fail, also through the proxy (point 8). If your curl does not get the content but a
+browser shows data, assume the extractor needs `useProxy: true` (and maybe JS); a browser that loads fine hides
+that difference, which is why the raw sample comes from curl.
+
+### 3. Write the definition
+Start from the closest file in [examples/](examples/README.md). Shape:
+
+```json
+{
+  "name": "Example shop - product page",
+  "description": "Name, price and stock of an example.com product page.",
+  "slug": "example-shop-product",
+  "url": "https://example.com/p/123",
+  "method": "GET",
+  "useProxy": true,
+  "renderJavascript": false,
+  "extractorConfig": {
+    "fields": [
+      { "name": "name", "selector": "main h1", "extract": "textContent", "transforms": ["normalizeWhitespace"] },
+      { "name": "price", "selector": "main [itemprop=\"price\"][content]", "extract": "attributeValue", "attributeName": "content", "transforms": ["toNumber"] },
+      { "name": "inStock", "selector": "main link[itemprop=\"availability\"][href$=\"InStock\"]", "extract": "exists" }
+    ]
+  }
+}
+```
+
+Rules that matter most:
+- Lists: ONE field with `isArray: true`, `extract: "innerHTML"`, a selector matching each item (not the
+  wrapper, no ads), and `subExtractor.fields` with selectors relative to the item.
+- Only supported selectors: no `+`, `~`, `:has()`, `:last-child`, `:contains()`, XPath. A non-array field
+  takes the FIRST match: scope to the main content.
+- Prefer stable hooks: `#id`, `[data-testid]`, `[itemprop]`, semantic tags; avoid generated classes.
+- Machine-readable values: attributes (`content`, `datetime`, `data-src`), current price not the struck one,
+  `toAbsoluteUrl` on links/images, `extractPrice` on prices, `exists` for booleans.
+- `attributeValue`: require the attribute in the selector (`a[href]`), else a missing attribute yields `"null"`.
+- Names: camelCase, one per value, stable (renaming later is a breaking version). If the user names the
+  fields themselves (`author_url`), use their names: camelCase is the default, not a rule over the user
+  (the local checker then warns; the server accepts any name).
+- Pick the most faithful source: the same value often exists twice (a video description in the player JSON
+  vs the rendered, truncated one). Prefer the structured source that holds the full value.
+- Sites that may answer a challenge page, consent wall or partial page with HTTP 200 (YouTube
+  `playabilityStatus`, consent walls): mark the core fields `required: true` and add a status field from the
+  source that is always present (e.g. `playabilityStatus.status`). A required field without a value fails the
+  request (`required_fields_missing`), still charged because the page was fetched; batch and pipelines retry it
+  once. In list items, `required` on a sub-field drops incomplete items instead, and `includePosition: true`
+  numbers the rest (references/config-reference.md, "Required fields and list positions").
+- `required: true` = the field must have a value on every page of this kind: an empty value fails the API
+  request (422 `required_fields_missing`, charged when the scraping service was billed) and an empty value in a
+  health probe makes the version `broken` (2 failing probes in a row). Mark the 1-3 fields that prove the page
+  was parsed (title / name / id / price on a product page); do not mark everything. Leave optional any field a
+  valid page may lack (ratings, discounts, zestimate, sale price, secondary images): null is then a normal value
+  and never affects health. Health marks a version broken only when a required field is empty, a required list
+  is empty `[]`, or nothing at all was extracted (references/releasing-and-versions.md, "Health checks"). An
+  optional list may be empty; on a list page mark the main list `required` (an empty main list = broken page).
+- Never put secrets (cookies, tokens) in headers or body; public and unlisted definitions are visible.
+- Custom `headers` (the `Cookie` header included) are not sent when the request goes through the scraping
+  proxy (`useProxy: true`); they are only sent on direct requests (`useProxy: false`). Scraping providers manage
+  headers for ban avoidance. A JSON API that needs auth headers must use `useProxy: false`. On direct requests
+  add only what the target needs; overriding User-Agent or Accept* may get the request blocked
+  (references/request-options.md).
+
+### 4. Validate and iterate
+**With an API key** (`EXTRACTHUB_API_KEY` in the environment; free, test keys work too): run the real engine
+on the saved sample file. The script calls the MCP tool `validate_extractor_config` for you, reading the
+sample from disk:
+```bash
+node scripts/validate.mjs my-extractor.json --html samples/page-1.html --url "<the page's url>"
+node scripts/validate.mjs my-extractor.json --sample-json samples/response.json   # sourceType "json"
+```
+It prints errors, warnings and per field what the dry run extracted (array lengths, which sub-fields are
+empty in how many items); `--out result.json` keeps the full result, `--strict` also fails on warnings.
+Exit 0 = valid. Calling the MCP tool `validate_extractor_config` directly with `sample_html` is equivalent,
+but only for small pages: never retype or paste a large page into a tool call.
+
+Read every error and warning and the dry-run output; fix and repeat until:
+- no errors; every requested field has the expected value on the sample;
+- list lengths equal the number of real items on the page; no wrong first matches.
+A `sample_empty` warning means the field matched nothing on this sample. Fix it, unless the value is
+genuinely absent on this page (`nextPageUrl` on the last page, `originalPrice` without a sale): then confirm
+it on a second page where it exists. The validator's `next_steps` names the empty fields, but read every
+warning yourself, not only `next_steps`. Validate against a second URL's sample too when you have one.
+Big sites (search engines, marketplaces, social networks) serve different layouts per request (A/B
+layouts), so results can differ per call. Sample 3-5 live fetches (a small batch of the same URL, or a few
+`extract` calls on `@draft`), compare their layouts and validate on each; when a live run differs from the
+dry run, get a sample of that response before changing selectors.
+
+**Without an API key**: run the bundled structure checker, then check selectors yourself against the saved HTML
+(e.g. search the HTML for each class / attribute; count list items):
+```bash
+node scripts/check-config.mjs my-extractor.json
+```
+It checks keys, types, option combinations and unsupported selectors (exit 0 = OK). It does not run
+selectors; tell the user the definition is unverified until it runs in ExtractHub.
+
+### 5. Upload and live-test (MCP)
+1. `create_extractor` with the definition fields (`name`, `description`, `url`, `method`, `body`, `headers`,
+   `useProxy`, `renderJavascript`, `captureXhr`, `xhrUrlFilter`, `browserActions`, `proxyCountry`,
+   `allowJsEscalation`, `waitForSelector`, `waitTime`, `extractorConfig`, `category`, `tags`, `slug`, `visibility`). Keep `visibility`
+   private unless the user asked otherwise. `category` is one value from the "Catalog category" table in
+   references/request-options.md (e.g. `travel`, not `Travel & Hospitality`). The slug can only be set here (later it is fixed). Note the
+   returned extractor id `@user/slug`. Creating, updating and releasing need a LIVE API key: with a test key
+   (`exth_test_...`) these tools answer `live_key_required` and only `validate_extractor_config` works.
+   A `validation_error` lists the failing paths in `details.errors`; `slug_taken` / `invalid_slug`: pick another.
+2. Call `get_account` (free). If `balance_usd` is 0 on a live key, do not try `extract`: stop at the draft,
+   run the release dry run (step 6) on your sample, and tell the user a top-up is needed for the live test.
+   Otherwise tell the user a live test is a billed extract call (`direct`, `premium` or `premium_js` tier, see
+   step 2; `get_account` shows the prices), then run `extract` with
+   `extractor_id: "@user/slug@draft"` and the example URL. A test API key only returns simulated data: a live
+   key is needed to see real output.
+3. Compare with the dry run. If they differ or fields are empty, see references/troubleshooting.md, fix the
+   definition, `update_extractor`, and test again. Stop after a few rounds and report what still fails.
+   Need the page the live run saw? `extract` with `raw_html: "link"` returns `raw_html_url` (full HTML, 1 h),
+   never a separate probe extractor.
+4. Drafts you created only to probe or that you gave up on: `delete_extractor` (dry run first, then
+   `confirm: true`). It only deletes private drafts that were never released; tell the user what you deleted.
+
+### 6. Release (only when the user agrees)
+`release_extractor` creates an immutable version (first one `1.0.0`; later bumps follow the output-schema
+change). Like the Studio, it checks the draft on a sample page first: pass your sample file through the
+script, or `fetch_sample: true` to let ExtractHub fetch the example URL once (one billed extract; tell the
+user), or `sample_from_job_id` / `sample_from_batch_item` to reuse the stored result of one of your own
+runs of the draft (free; a job that stored the page re-runs the full check, otherwise the stored extraction
+must come from the current draft config). A page over the 2,000,000 character `sample_html` limit: `extract` it
+with `raw_html: "link"` and pass the returned link as `sample_raw_html_url` (no size limit; same full check; also on
+`validate_extractor_config`). Run the dry run first and show the user the planned version and schema diff:
+```bash
+node scripts/validate.mjs --release @user/slug --html samples/page-1.html
+```
+then, after the user's OK, the same command with `--no-dry-run` (plus `--bump` / `--changelog` when needed),
+or the MCP tool `release_extractor` without `dry_run`. Optional: `bump` (may raise, never lower: `bump_too_low`),
+`changelog` (`changelog_required` when a version needs one). `nothing_to_release` means the draft equals the
+latest version; `release_check_failed` lists what blocks it (fix with `update_extractor`). Explain: consumers should call `@user/slug@1` (latest 1.x, gets fixes, never breaking changes) or an
+exact `@user/slug@1.0.0`; `@draft` is owner-only. Ask before switching visibility to `unlisted` or `public` (public only after a release, else `release_required`).
+The extractor's catalog page shows the latest release's sample: its "Extracted Data" is the sample output of the
+release check and its source preview is the sample page the check ran on. So release with a representative page
+(full data, not an empty or blocked one), ideally of the example `url`. The release answer's `warnings` say when
+it is not: `no_preview_page` (a stored extraction only: `sample_from_batch_item`, or a job without the page) and
+`preview_url_differs` (the sample page is not the example url). Fix both with `set_preview_page`.
+After a release, `set_sample_output` replaces a version's sample (shown on its page and returned to test
+keys) with a real result of exactly that version (a job / batch item run with `@user/slug@1.0.0` or `@1`).
+`set_preview_page` (live key, owner, exact version `@user/slug@1.0.0`) replaces the version's preview page and, by
+default, its sample output from the same page, without a new version: `source: "fetch"` (one billed extract of the
+example url, or `url`; tell the user), `"sample_html"`, `"job_id"` (your job that stored the page) or `"raw_html_url"`.
+Run it with `dry_run: true` first (price, page size, extracted fields; nothing fetched). `get_extractor` shows each
+version's `preview` (`available`, `source_url`, `fetched_at`, `size`). After `update_extractor` changes `url`, the
+released preview still shows the old page until you call `set_preview_page`.
+Details: references/releasing-and-versions.md.
+
+### Without the MCP server
+With an API key but no MCP connection (e.g. a client that only supports OAuth connectors), steps 4 and 6
+still work through `scripts/validate.mjs`: it talks to the MCP endpoint itself. Uploading then goes through
+the Studio import below. Deliver:
+1. The definition JSON (validated with `scripts/check-config.mjs`, and with `scripts/validate.mjs` when a key is available).
+2. A Studio import file: `node scripts/check-config.mjs my-extractor.json --studio-out my-extractor.studio.json`.
+   The user opens ExtractHub → Extractor Studio → ⋮ menu → **Import**, picks the file, checks the preview on
+   the fetched page, then **Save** (and Release). Browser actions are not in the import file: tell the user
+   to add them in the Studio "Browser actions" panel (list them).
+3. How to connect the MCP server next time (see the skill README): it makes steps 4-6 automatic.
+
+## Final answer to the user
+Report: the extractor id and pins (if uploaded), fetch mode and why, the fields with a sample of the real
+output, the price tier (direct, standard or JS), anything unverified or fragile (generated classes, positional
+selectors), and the next step (release, or fixes needed).
