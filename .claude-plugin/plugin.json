@@ -1,7 +1,7 @@
 {
   "name": "extracthub",
   "displayName": "ExtractHub",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Build, test and release ExtractHub extractors (versioned web scrapers) and pipelines, and run them through the ExtractHub MCP server.",
   "author": {
     "name": "ExtractHub",
